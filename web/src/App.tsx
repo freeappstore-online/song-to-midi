@@ -3,6 +3,7 @@ import { initApp } from '@freeappstore/sdk'
 import { type NavItem, PageHeader, Shell, useToast } from '@freeappstore/sdk/ui'
 import { analyze, type Analysis, type MidiNote, type Part } from './analysis'
 import { encodeMidi } from './midi'
+import { analyzeWithBasicPitch } from './ai'
 
 const fas = initApp({ appId: 'song-to-midi' })
 const NAV: NavItem[] = [
@@ -32,9 +33,9 @@ function About() {
     <PageHeader title="How it works" description="A local, editable MIDI sketch from a recording." />
     <div className="panel prose">
       <h2>What this version analyzes</h2>
-      <p>Capture sound from another browser tab or open an audio file. The app decodes it in your browser, estimates bass, upper lead and harmony notes from harmonic peaks, and estimates kick, snare and hi-hat events from spectral transients. It writes separate tracks to a standard MIDI file. Recording and note data stay in this tab and disappear when you close it.</p>
+      <p>Capture sound from another browser tab or open an audio file. The app decodes it in your browser, estimates bass, upper lead and harmony notes using either harmonic peaks or a local pitch model, and estimates kick, snare and hi-hat events from spectral transients. It writes separate tracks to a standard MIDI file. Recording and note data stay in this tab and disappear when you close it.</p>
       <h2>Accuracy</h2>
-      <p>The tracks are frequency and transient estimates, not separated audio stems. Overlapping instruments, vocals, reverberation, distorted sounds, and dense mixes can produce missing or incorrect notes. Program choices are editable suggestions. A General MIDI soundfont in a DAW will usually sound better than the app’s simple oscillator preview, but MIDI cannot reproduce every detail of a studio recording.</p>
+      <p>Fast mode uses frequency and transient estimates. AI note mode downloads the free Spotify Basic Pitch model and transcribes pitched notes locally. It groups notes into approximate bass, lead and harmony tracks by range and overlap; it does not isolate instruments. Both modes can miss notes. Program choices are editable suggestions. A General MIDI soundfont in a DAW will usually sound better than the app’s simple oscillator preview, and MIDI cannot reproduce every detail of a studio recording.</p>
       <h2>Capture</h2>
       <p>Choose “Record browser tab,” select the tab playing your song and enable audio sharing in the browser picker. Some browsers and protected media do not provide tab audio. The local file option works independently of tab capture. Use recordings you have permission to process.</p>
     </div>
@@ -52,6 +53,7 @@ function Studio() {
   const [recordingBytes, setRecordingBytes] = useState(0)
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState(0)
+  const [analysisStage, setAnalysisStage] = useState('')
   const [analysis, setAnalysis] = useState<Analysis | null>(null)
   const [selected, setSelected] = useState<{ part: string; index: number } | null>(null)
   const [cursor, setCursor] = useState(0)
@@ -140,17 +142,23 @@ function Studio() {
     } catch (error) { stream?.getTracks().forEach(t => t.stop()); stopRecordingMonitors(); toast.show(error instanceof Error ? error.message : 'Could not record this tab.', { variant: 'error' }) }
   }
   const stopRecording = () => { if (recorder.current?.state !== 'inactive') recorder.current?.stop() }
-  const run = async () => {
+  const run = async (mode: 'fast' | 'ai') => {
     if (!audio) return
-    stopAudio(); setBusy(true); setProgress(0); setAnalysis(null)
+    stopAudio(); setBusy(true); setProgress(0); setAnalysis(null); setAnalysisStage(mode === 'ai' ? 'Preparing AI note analysis' : 'Estimating notes')
     const controller = new AbortController(); abort.current = controller
     let decoder: AudioContext | null = null
     try {
       decoder = new AudioContext()
       const buffer = await decoder.decodeAudioData(await audio.arrayBuffer())
       if (controller.signal.aborted) return
-      const result = await analyze(buffer, setProgress, controller.signal)
-      setAnalysis(result); setCursor(0); toast.show('MIDI sketch ready. Review the notes before export.', { variant: 'success' })
+      if (mode === 'ai') {
+        const result = await analyzeWithBasicPitch(buffer, (fraction, stage) => { setProgress(fraction); setAnalysisStage(stage) }, controller.signal)
+        setAnalysis(result)
+      } else {
+        const result = await analyze(buffer, setProgress, controller.signal)
+        setAnalysis(result)
+      }
+      setCursor(0); toast.show('MIDI sketch ready. Review the notes before export.', { variant: 'success' })
     } catch (error) { if (!controller.signal.aborted) toast.show(error instanceof Error ? error.message : 'Audio analysis failed.', { variant: 'error' }) }
     finally { if (decoder) void decoder.close(); if (abort.current === controller) abort.current = null; setBusy(false) }
   }
@@ -214,9 +222,10 @@ function Studio() {
     </section>
     <section className="panel">
       <h2>2. Analyze and review</h2>
-      <div className="actions"><button type="button" className="primary" disabled={!audio || busy || recording} onClick={() => void run()}>Analyze recording</button>{busy && <button type="button" onClick={() => abort.current?.abort()}>Cancel</button>}</div>
-      {busy && <><progress value={progress} max="1" aria-label="Analysis progress" /><p className="muted">Analyzing locally… {Math.round(progress * 100)}%</p></>}
-      {!analysis && <p className="muted">This version estimates bass, lead, harmony and drum events. It cannot isolate instrument audio stems from a dense mix.</p>}
+      <div className="actions"><button type="button" disabled={!audio || busy || recording} onClick={() => void run('fast')}>Fast note estimate</button><button type="button" className="primary" disabled={!audio || busy || recording} onClick={() => void run('ai')}>AI note transcription</button>{busy && <button type="button" onClick={() => abort.current?.abort()}>Cancel</button>}</div>
+      <p className="muted">AI mode runs Spotify Basic Pitch in this browser. The small model downloads on first use; longer songs can take several minutes to transcribe.</p>
+      {busy && <><progress value={progress} max="1" aria-label="Analysis progress" /><p className="muted">{analysisStage} · {Math.round(progress * 100)}%</p></>}
+      {!analysis && <p className="muted">Fast mode estimates notes from spectral peaks. AI mode uses a trained pitch model to transcribe the mix, then groups notes into approximate bass, lead and harmony tracks. Neither mode separates audio stems.</p>}
       {analysis && <>
         <div className="summary"><span>{timeLabel(analysis.duration)} analyzed</span><span>~{analysis.tempo} BPM</span><span>{analysis.parts.reduce((n, p) => n + p.notes.length, 0)} note events</span></div>
         <div className="warning">{analysis.warnings.join(' ')}</div>
@@ -230,6 +239,6 @@ function Studio() {
         {selectedNote && selectedPart && <div className="editor"><h3>Edit selected note · {selectedPart.name}</h3><div className="note-fields"><label>Pitch <input type="number" min="0" max="127" value={selectedNote.pitch} onChange={e => changeNote(selectedPart.id, selected!.index, { pitch: Math.max(0, Math.min(127, Number(e.target.value))) })} /></label><label>Start (s) <input type="number" min="0" max={analysis.duration} step="0.01" value={selectedNote.start.toFixed(2)} onChange={e => changeNote(selectedPart.id, selected!.index, { start: Math.max(0, Number(e.target.value)) })} /></label><label>End (s) <input type="number" min="0" max={analysis.duration} step="0.01" value={selectedNote.end.toFixed(2)} onChange={e => changeNote(selectedPart.id, selected!.index, { end: Math.max(0, Number(e.target.value)) })} /></label><label>Velocity <input type="number" min="1" max="127" value={selectedNote.velocity} onChange={e => changeNote(selectedPart.id, selected!.index, { velocity: Math.max(1, Math.min(127, Number(e.target.value))) })} /></label><button type="button" onClick={() => { changePart(selectedPart.id, { notes: selectedPart.notes.filter((_, i) => i !== selected!.index) }); setSelected(null) }}>Delete note</button></div></div>}
       </>}
     </section>
-    <section className="panel"><h2>3. Export</h2><p className="muted">Export four editable tracks to a standard MIDI file. For a closer sound, load it in a DAW and assign your preferred soundfont or virtual instruments.</p><button type="button" className="primary" disabled={!analysis} onClick={exportMidi}>Download multitrack MIDI</button></section>
+    <section className="panel"><h2>3. Export</h2><p className="muted">Export editable tracks to a standard MIDI file. For a closer sound, load it in a DAW and assign your preferred soundfont or virtual instruments.</p><button type="button" className="primary" disabled={!analysis} onClick={exportMidi}>Download multitrack MIDI</button></section>
   </>
 }

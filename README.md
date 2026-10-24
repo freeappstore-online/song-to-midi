@@ -5,13 +5,14 @@ A FreeAppStore browser app for capturing tab audio or opening a local recording,
 ## What works
 
 - Browser tab audio capture through `getDisplayMedia` and `MediaRecorder`, with an audio-file fallback.
+- Live recording timer, progress bar, captured size and input-level meter.
 - Local decode and analysis of recordings up to three minutes. No recording upload or server storage.
-- FFT harmonic salience with subharmonic suppression for bass, lead, and harmony note candidates; broad-band energy changes for kick/snare/hat candidates. Detected onset timing is preserved rather than forcing a beat grid.
-- Approximate tempo, confidence, piano-roll review, note start/end/pitch/velocity edits, mute/solo, and General MIDI program selection.
-- A/B playback of the original and a simple oscillator sketch, and Type 1 multitrack `.mid` export with a tempo map and percussion channel.
+- **Fast mode:** FFT harmonic salience for bass, lead and harmony candidates, plus transient estimates for kick, snare and hi-hat.
+- **AI note mode:** Spotify Basic Pitch runs locally on the full mix to transcribe polyphonic pitched notes. The app groups these by pitch and overlap into approximate bass, lead and harmony MIDI tracks; drum and tempo estimates come from transient analysis.
+- Piano-roll review, note start/end/pitch/velocity edits, mute/solo, General MIDI program selection, original/MIDI preview and Type 1 multitrack `.mid` export.
 
 ## Limits
 
-This is a signal-processing MIDI sketch. It does **not** isolate audio stems, identify actual instrument makes/models, or faithfully reproduce a dense studio mix. Vocals, reverb, distortion and overlapping pitches can confuse it. The in-app oscillator preview is much simpler than a soundfont or DAW instrument. Review and correct the notes and choose a quality General MIDI soundfont after export.
+Neither mode isolates audio stems or identifies specific instruments reliably. Dense mixes, vocals, effects and overlapping pitches can confuse transcription. The in-app oscillator preview is simpler than a soundfont or DAW instrument. Review the notes and choose good virtual instruments after export.
 
-No external model or third-party sample library is used. A future higher-fidelity version would need licensed source-separation and polyphonic transcription models, substantial client compute or a consent-based processing backend, plus timbre-matched soundfont selection.
+AI note mode uses [Spotify Basic Pitch](https://github.com/spotify/basic-pitch-ts) (Apache 2.0). The model is loaded from jsDelivr and inference runs in the browser; recordings are not uploaded. Performance varies by device and song length.

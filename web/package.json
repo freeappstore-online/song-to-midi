@@ -10,6 +10,8 @@
   },
   "dependencies": {
     "@freeappstore/sdk": "^0.14.30",
+    "@spotify/basic-pitch": "1.0.1",
+    "@tensorflow/tfjs": "3.21.0",
     "react": "^19.2.5",
     "react-dom": "^19.2.5"
   },
