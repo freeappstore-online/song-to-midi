@@ -47,6 +47,9 @@ function Studio() {
   const [audioUrl, setAudioUrl] = useState('')
   const [sourceName, setSourceName] = useState('')
   const [recording, setRecording] = useState(false)
+  const [recordingSeconds, setRecordingSeconds] = useState(0)
+  const [recordingLevel, setRecordingLevel] = useState(0)
+  const [recordingBytes, setRecordingBytes] = useState(0)
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState(0)
   const [analysis, setAnalysis] = useState<Analysis | null>(null)
@@ -59,6 +62,18 @@ function Studio() {
   const context = useRef<AudioContext | null>(null)
   const original = useRef<HTMLAudioElement | null>(null)
   const timer = useRef<number | null>(null)
+  const recordTick = useRef<number | null>(null)
+  const levelFrame = useRef<number | null>(null)
+  const recordLimit = useRef<number | null>(null)
+  const meterContext = useRef<AudioContext | null>(null)
+
+  const stopRecordingMonitors = () => {
+    if (recordTick.current !== null) { clearInterval(recordTick.current); recordTick.current = null }
+    if (levelFrame.current !== null) { cancelAnimationFrame(levelFrame.current); levelFrame.current = null }
+    if (recordLimit.current !== null) { clearTimeout(recordLimit.current); recordLimit.current = null }
+    if (meterContext.current) { void meterContext.current.close(); meterContext.current = null }
+    setRecordingLevel(0)
+  }
 
   const stopAudio = () => {
     original.current?.pause()
@@ -72,7 +87,13 @@ function Studio() {
     setAudioUrl(old => { if (old) URL.revokeObjectURL(old); return URL.createObjectURL(blob) })
   }
   useEffect(() => () => {
-    abort.current?.abort(); recorder.current?.stop(); capture.current?.getTracks().forEach(track => track.stop())
+    abort.current?.abort()
+    if (recorder.current && recorder.current.state !== 'inactive') recorder.current.stop()
+    capture.current?.getTracks().forEach(track => track.stop())
+    if (recordTick.current !== null) clearInterval(recordTick.current)
+    if (levelFrame.current !== null) cancelAnimationFrame(levelFrame.current)
+    if (recordLimit.current !== null) clearTimeout(recordLimit.current)
+    if (meterContext.current) void meterContext.current.close()
     if (context.current) void context.current.close()
     original.current?.pause()
     if (timer.current !== null) clearTimeout(timer.current)
@@ -80,22 +101,43 @@ function Studio() {
   useEffect(() => () => { if (audioUrl) URL.revokeObjectURL(audioUrl) }, [audioUrl])
 
   const recordTab = async () => {
+    let stream: MediaStream | null = null
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true })
+      stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true })
       if (!stream.getAudioTracks().length) { stream.getTracks().forEach(t => t.stop()); throw new Error('No tab audio was shared. Select a tab and enable audio in the picker.') }
       const audioStream = new MediaStream(stream.getAudioTracks())
+      const sharedStream = stream
       const chunks: BlobPart[] = []
       const media = new MediaRecorder(audioStream)
       capture.current = stream; recorder.current = media
-      media.ondataavailable = e => { if (e.data.size) chunks.push(e.data) }
+      media.ondataavailable = e => { if (e.data.size) { chunks.push(e.data); setRecordingBytes(value => value + e.data.size) } }
       media.onstop = () => {
-        stream.getTracks().forEach(t => t.stop()); capture.current = null; recorder.current = null; setRecording(false)
+        stopRecordingMonitors()
+        sharedStream.getTracks().forEach(t => t.stop()); capture.current = null; recorder.current = null; setRecording(false)
         if (chunks.length) replaceAudio(new Blob(chunks, { type: media.mimeType || 'audio/webm' }), `Tab recording ${new Date().toLocaleTimeString()}`)
       }
       stream.getVideoTracks()[0]?.addEventListener('ended', () => { if (media.state !== 'inactive') media.stop() }, { once: true })
-      media.start(1000); setRecording(true)
-      setTimeout(() => { if (media.state !== 'inactive') media.stop() }, 180_000)
-    } catch (error) { toast.show(error instanceof Error ? error.message : 'Could not record this tab.', { variant: 'error' }) }
+      stream.getAudioTracks()[0]?.addEventListener('ended', () => { if (media.state !== 'inactive') media.stop() }, { once: true })
+      media.start(1000); setRecording(true); setRecordingSeconds(0); setRecordingBytes(0); setRecordingLevel(0)
+      const started = performance.now()
+      recordTick.current = window.setInterval(() => setRecordingSeconds(Math.min(180, Math.floor((performance.now() - started) / 1000))), 250)
+      recordLimit.current = window.setTimeout(() => { if (media.state !== 'inactive') media.stop() }, 180_000)
+      try {
+        const ctx = new AudioContext(); meterContext.current = ctx
+        void ctx.resume().catch(() => {})
+        const source = ctx.createMediaStreamSource(audioStream), analyser = ctx.createAnalyser()
+        analyser.fftSize = 1024; source.connect(analyser)
+        const samples = new Uint8Array(analyser.fftSize)
+        const updateLevel = () => {
+          analyser.getByteTimeDomainData(samples)
+          let sum = 0
+          for (const sample of samples) { const value = (sample - 128) / 128; sum += value * value }
+          setRecordingLevel(Math.min(100, Math.round(Math.sqrt(sum / samples.length) * 280)))
+          levelFrame.current = requestAnimationFrame(updateLevel)
+        }
+        updateLevel()
+      } catch { if (meterContext.current) { void meterContext.current.close(); meterContext.current = null }; setRecordingLevel(0) }
+    } catch (error) { stream?.getTracks().forEach(t => t.stop()); stopRecordingMonitors(); toast.show(error instanceof Error ? error.message : 'Could not record this tab.', { variant: 'error' }) }
   }
   const stopRecording = () => { if (recorder.current?.state !== 'inactive') recorder.current?.stop() }
   const run = async () => {
@@ -162,7 +204,12 @@ function Studio() {
         <button type="button" onClick={recording ? stopRecording : recordTab} className="primary">{recording ? '■ Stop recording' : '● Record browser tab'}</button>
         <label className="file-button">Open audio file<input type="file" accept="audio/*" onChange={e => { const file = e.target.files?.[0]; if (file) replaceAudio(file, file.name) }} /></label>
       </div>
-      {recording && <p className="status">Recording tab audio. Play the song in that tab, then return here and stop. Maximum three minutes.</p>}
+      {recording && <div className="recording-progress" role="status" aria-label="Recording progress">
+        <div className="recording-progress-top"><strong><span className="recording-dot" /> Recording</strong><span>{timeLabel(recordingSeconds)} / 3:00</span></div>
+        <progress value={recordingSeconds} max="180" aria-label="Recording time progress" />
+        <div className="recording-progress-bottom"><label>Input level <meter min="0" max="100" value={recordingLevel} aria-label="Tab audio input level" /></label><span>{(recordingBytes / 1024 / 1024).toFixed(1)} MB captured</span></div>
+        <p className="muted">Play the song in the shared tab, then return here and stop recording.</p>
+      </div>}
       {audio && <div className="source"><strong>{sourceName}</strong><span>{(audio.size / 1024 / 1024).toFixed(1)} MB</span><audio ref={original} src={audioUrl} controls onEnded={() => setPlaying(null)} /></div>}
     </section>
     <section className="panel">
