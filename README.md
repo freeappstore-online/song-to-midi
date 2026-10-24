@@ -1,41 +1,17 @@
-# template-standalone
+# Song to MIDI Studio
 
-The standalone-app template used by [`fas init`](https://github.com/freeappstore-online/platform/tree/main/packages/cli) to scaffold new free apps for [FreeAppStore](https://freeappstore.online).
+A FreeAppStore browser app for capturing tab audio or opening a local recording, estimating musical events, editing the result, and exporting a multitrack Standard MIDI File.
 
-You almost certainly want to use the CLI, not clone this directly:
+## What works
 
-```bash
-npm i -g @freeappstore/cli
-fas init my-app
-```
+- Browser tab audio capture through `getDisplayMedia` and `MediaRecorder`, with an audio-file fallback.
+- Local decode and analysis of recordings up to three minutes. No recording upload or server storage.
+- FFT harmonic salience with subharmonic suppression for bass, lead, and harmony note candidates; broad-band energy changes for kick/snare/hat candidates. Detected onset timing is preserved rather than forcing a beat grid.
+- Approximate tempo, confidence, piano-roll review, note start/end/pitch/velocity edits, mute/solo, and General MIDI program selection.
+- A/B playback of the original and a simple oscillator sketch, and Type 1 multitrack `.mid` export with a tempo map and percussion channel.
 
-The CLI clones this template, replaces every `song-to-midi` placeholder with your app id, runs `git init`, and makes the first commit — the result is a runnable app you can `pnpm dev` immediately.
+## Limits
 
-## What's in here
+This is a signal-processing MIDI sketch. It does **not** isolate audio stems, identify actual instrument makes/models, or faithfully reproduce a dense studio mix. Vocals, reverb, distortion and overlapping pitches can confuse it. The in-app oscillator preview is much simpler than a soundfont or DAW instrument. Review and correct the notes and choose a quality General MIDI soundfont after export.
 
-- `web/` — Vite + React + TypeScript + Tailwind 4 app, ESM-only.
-- `web/src/App.tsx` — the app wrapped in the SDK's `Shell` (`@freeappstore/sdk/ui`) with two starter screens, Home (`/`) and About (`/about`), declared in its `nav` prop. A new app renders the standard topbar, its navigation (`<nav aria-label="Main">`), an error boundary, toasts and an offline banner from the first render. No sign-in required.
-- `web/src/index.css` — brand fonts (Manrope + Fraunces) and the design tokens (`--paper`, `--ink`, `--accent`, …); dark mode via `:root[data-theme='dark']`, which the SDK sets from the system or the Shell's theme toggle.
-- `web/src/main.tsx` — React entry point.
-- `web/index.html` — links Manrope + Fraunces, sets PWA meta tags, references the manifest.
-- `web/public/manifest.json` — PWA manifest with `name`, `display`, `start_url`.
-- `package.json` — pnpm workspace, `dev` / `build` / `typecheck` / `test` scripts.
-- `.github/workflows/compliance.yml` — runs the same checks as `fas check` on every PR. Source of truth lives in the [`@freeappstore/compliance`](https://www.npmjs.com/package/@freeappstore/compliance) package.
-
-## Cloning manually (not recommended)
-
-If you really want to scaffold by hand:
-
-```bash
-git clone https://github.com/freeappstore-online/template-standalone my-app
-cd my-app
-# Replace song-to-midi → my-app in package.json, web/index.html, web/src/App.tsx, README, etc.
-rm -rf .git && git init
-pnpm install && pnpm dev
-```
-
-Then run `fas publish` to provision repo + hosting + DNS, or open the [submission form](https://github.com/freeappstore-online/submissions/issues/new) for maintainer review.
-
-## License
-
-MIT.
+No external model or third-party sample library is used. A future higher-fidelity version would need licensed source-separation and polyphonic transcription models, substantial client compute or a consent-based processing backend, plus timbre-matched soundfont selection.
