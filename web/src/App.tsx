@@ -4,6 +4,7 @@ import { type NavItem, PageHeader, Shell, useToast } from '@freeappstore/sdk/ui'
 import { analyze, type Analysis, type MidiNote, type Part } from './analysis'
 import { encodeMidi } from './midi'
 import { analyzeWithBasicPitch } from './ai'
+import { deleteRecording, listRecordings, saveRecording, type SavedRecording } from './recordings'
 
 const fas = initApp({ appId: 'song-to-midi' })
 const NAV: NavItem[] = [
@@ -33,11 +34,12 @@ function About() {
     <PageHeader title="How it works" description="A local, editable MIDI sketch from a recording." />
     <div className="panel prose">
       <h2>What this version analyzes</h2>
-      <p>Capture sound from another browser tab or open an audio file. The app decodes it in your browser, estimates bass, upper lead and harmony notes using either harmonic peaks or a local pitch model, and estimates kick, snare and hi-hat events from spectral transients. It writes separate tracks to a standard MIDI file. Recording and note data stay in this tab and disappear when you close it.</p>
+      <p>Capture sound from another browser tab or open an audio file. The app decodes it in your browser, estimates bass, upper lead and harmony notes using either harmonic peaks or a local pitch model, and estimates kick, snare and hi-hat events from spectral transients. It writes separate tracks to a standard MIDI file. Tab captures are saved in this browser so you can reopen them later. Analysis and note edits remain in this tab until you export MIDI.</p>
       <h2>Accuracy</h2>
       <p>Fast mode uses frequency and transient estimates. AI note mode downloads the free Spotify Basic Pitch model and transcribes pitched notes locally. It groups notes into approximate bass, lead and harmony tracks by range and overlap; it does not isolate instruments. Both modes can miss notes. Program choices are editable suggestions. A General MIDI soundfont in a DAW will usually sound better than the app’s simple oscillator preview, and MIDI cannot reproduce every detail of a studio recording.</p>
       <h2>Capture</h2>
       <p>Choose “Record browser tab,” select the tab playing your song and enable audio sharing in the browser picker. Some browsers and protected media do not provide tab audio. The local file option works independently of tab capture. Use recordings you have permission to process.</p>
+      <p>Saved recordings stay on this device in this browser’s local storage. Clearing site data or using a private window can remove them.</p>
     </div>
   </>
 }
@@ -47,6 +49,10 @@ function Studio() {
   const [audio, setAudio] = useState<Blob | null>(null)
   const [audioUrl, setAudioUrl] = useState('')
   const [sourceName, setSourceName] = useState('')
+  const [savedRecordings, setSavedRecordings] = useState<SavedRecording[]>([])
+  const [selectedRecordingId, setSelectedRecordingId] = useState<string | null>(null)
+  const [savingRecording, setSavingRecording] = useState(false)
+  const [recordingStorageError, setRecordingStorageError] = useState('')
   const [recording, setRecording] = useState(false)
   const [recordingSeconds, setRecordingSeconds] = useState(0)
   const [recordingLevel, setRecordingLevel] = useState(0)
@@ -59,6 +65,7 @@ function Studio() {
   const [cursor, setCursor] = useState(0)
   const [playing, setPlaying] = useState<'original' | 'midi' | null>(null)
   const recorder = useRef<MediaRecorder | null>(null)
+  const currentAudio = useRef<Blob | null>(null)
   const capture = useRef<MediaStream | null>(null)
   const abort = useRef<AbortController | null>(null)
   const context = useRef<AudioContext | null>(null)
@@ -83,11 +90,18 @@ function Studio() {
     if (timer.current !== null) { clearTimeout(timer.current); timer.current = null }
     setPlaying(null)
   }
-  const replaceAudio = (blob: Blob, name: string) => {
+  const replaceAudio = (blob: Blob, name: string, savedId: string | null = null) => {
     stopAudio(); abort.current?.abort(); setAnalysis(null); setSelected(null); setProgress(0)
-    setAudio(blob); setSourceName(name)
+    currentAudio.current = blob; setAudio(blob); setSourceName(name); setSelectedRecordingId(savedId)
     setAudioUrl(old => { if (old) URL.revokeObjectURL(old); return URL.createObjectURL(blob) })
   }
+  useEffect(() => {
+    let active = true
+    void listRecordings().then(items => { if (active) setSavedRecordings(items) }).catch(error => {
+      if (active) setRecordingStorageError(error instanceof Error ? error.message : 'Could not load saved recordings.')
+    })
+    return () => { active = false }
+  }, [])
   useEffect(() => () => {
     abort.current?.abort()
     if (recorder.current && recorder.current.state !== 'inactive') recorder.current.stop()
@@ -116,7 +130,20 @@ function Studio() {
       media.onstop = () => {
         stopRecordingMonitors()
         sharedStream.getTracks().forEach(t => t.stop()); capture.current = null; recorder.current = null; setRecording(false)
-        if (chunks.length) replaceAudio(new Blob(chunks, { type: media.mimeType || 'audio/webm' }), `Tab recording ${new Date().toLocaleTimeString()}`)
+        if (chunks.length) {
+          const blob = new Blob(chunks, { type: media.mimeType || 'audio/webm' })
+          const name = `Tab recording ${new Date().toLocaleString()}`
+          replaceAudio(blob, name)
+          setSavingRecording(true); setRecordingStorageError('')
+          void saveRecording(blob, name).then(item => {
+            setSavedRecordings(old => [item, ...old])
+            if (currentAudio.current === blob) setSelectedRecordingId(item.id)
+          }).catch(error => {
+            const message = error instanceof Error ? error.message : 'Could not save this recording.'
+            setRecordingStorageError(`${message} Download a copy before leaving this page.`)
+            toast.show('Recording is available now, but could not be saved.', { variant: 'error' })
+          }).finally(() => setSavingRecording(false))
+        }
       }
       stream.getVideoTracks()[0]?.addEventListener('ended', () => { if (media.state !== 'inactive') media.stop() }, { once: true })
       stream.getAudioTracks()[0]?.addEventListener('ended', () => { if (media.state !== 'inactive') media.stop() }, { once: true })
@@ -142,6 +169,21 @@ function Studio() {
     } catch (error) { stream?.getTracks().forEach(t => t.stop()); stopRecordingMonitors(); toast.show(error instanceof Error ? error.message : 'Could not record this tab.', { variant: 'error' }) }
   }
   const stopRecording = () => { if (recorder.current?.state !== 'inactive') recorder.current?.stop() }
+  const removeSavedRecording = async (id: string) => {
+    try {
+      await deleteRecording(id)
+      setSavedRecordings(old => old.filter(item => item.id !== id))
+      if (selectedRecordingId === id) setSelectedRecordingId(null)
+    } catch (error) { toast.show(error instanceof Error ? error.message : 'Could not delete recording.', { variant: 'error' }) }
+  }
+  const downloadRecording = (blob: Blob, name: string) => {
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    const extension = name.match(/\.([a-z0-9]{2,5})$/i)?.[1] ?? (blob.type.includes('ogg') ? 'ogg' : blob.type.includes('mp4') ? 'm4a' : 'webm')
+    link.href = url; link.download = `${name.replace(/\.[^.]+$/, '').replace(/[^\w-]+/g, '-').toLowerCase() || 'recording'}.${extension}`
+    link.click()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
   const run = async (mode: 'fast' | 'ai') => {
     if (!audio) return
     stopAudio(); setBusy(true); setProgress(0); setAnalysis(null); setAnalysisStage(mode === 'ai' ? 'Preparing AI note analysis' : 'Estimating notes')
@@ -207,7 +249,7 @@ function Studio() {
     <PageHeader title="Song to MIDI Studio" description="Capture a recording, inspect estimated parts, and export editable multitrack MIDI." />
     <section className="panel">
       <h2>1. Choose a recording</h2>
-      <p className="muted">Select the song’s browser tab and share its audio, as in Karaoke. Or open a file. Audio stays in this browser tab.</p>
+      <p className="muted">Select the song’s browser tab and share its audio, as in Karaoke. New tab recordings are saved on this device automatically.</p>
       <div className="actions">
         <button type="button" onClick={recording ? stopRecording : recordTab} className="primary">{recording ? '■ Stop recording' : '● Record browser tab'}</button>
         <label className="file-button">Open audio file<input type="file" accept="audio/*" onChange={e => { const file = e.target.files?.[0]; if (file) replaceAudio(file, file.name) }} /></label>
@@ -218,7 +260,10 @@ function Studio() {
         <div className="recording-progress-bottom"><label>Input level <meter min="0" max="100" value={recordingLevel} aria-label="Tab audio input level" /></label><span>{(recordingBytes / 1024 / 1024).toFixed(1)} MB captured</span></div>
         <p className="muted">Play the song in the shared tab, then return here and stop recording.</p>
       </div>}
-      {audio && <div className="source"><strong>{sourceName}</strong><span>{(audio.size / 1024 / 1024).toFixed(1)} MB</span><audio ref={original} src={audioUrl} controls onEnded={() => setPlaying(null)} /></div>}
+      {savingRecording && <p role="status" className="muted">Saving recording on this device…</p>}
+      {recordingStorageError && <p role="alert" className="warning">{recordingStorageError}</p>}
+      {audio && <div className="source"><strong>{sourceName}</strong><span>{(audio.size / 1024 / 1024).toFixed(1)} MB{selectedRecordingId ? ' · Saved on this device' : ''}</span><audio ref={original} src={audioUrl} controls onEnded={() => setPlaying(null)} /><button type="button" onClick={() => downloadRecording(audio, sourceName)}>Download audio copy</button></div>}
+      <div className="saved-recordings"><h3>Saved recordings</h3>{savedRecordings.length ? <ul>{savedRecordings.map(item => <li key={item.id}><div><strong>{item.name}</strong><small>{new Date(item.createdAt).toLocaleString()} · {(item.size / 1024 / 1024).toFixed(1)} MB</small></div><div className="actions compact"><button type="button" disabled={recording || busy} onClick={() => replaceAudio(item.blob, item.name, item.id)}>{selectedRecordingId === item.id ? 'Selected' : 'Open'}</button><button type="button" onClick={() => downloadRecording(item.blob, item.name)}>Download</button><button type="button" onClick={() => void removeSavedRecording(item.id)}>Delete</button></div></li>)}</ul> : <p className="muted">Your tab recordings will appear here after you stop recording.</p>}</div>
     </section>
     <section className="panel">
       <h2>2. Analyze and review</h2>
