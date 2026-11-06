@@ -1,0 +1,6 @@
+{
+  "appId": "song-to-midi",
+  "applicationRoot": "web",
+  "outputPath": "web/dist",
+  "buildCommand": "pnpm build"
+}
