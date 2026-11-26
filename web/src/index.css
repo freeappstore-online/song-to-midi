@@ -1,4 +1,6 @@
 @import "tailwindcss";
+@source "../node_modules/@freeappstore/sdk/dist";
+@source "../../node_modules/@freeappstore/sdk/dist";
 
 @layer base {
 
